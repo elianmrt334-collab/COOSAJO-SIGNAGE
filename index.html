@@ -3,14 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard COOSAJO Automático</title>
+    <title>Dashboard COOSAJO (Nube)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
-        import { getFirestore, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
 
+        // Configuración de Firebase
         const firebaseConfig = {
           apiKey: "AIzaSyBGF-do5_cykTa9rB5NK-7ie4x4rpoYc0g",
           authDomain: "coosajo-signage.firebaseapp.com",
@@ -19,79 +20,84 @@
           messagingSenderId: "941731323301",
           appId: "1:941731323301:web:a786e9fe7cbec6c66b9c4c"
         };
-
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
 
-        let targetIp = "";
+        // Configuración de Cloudinary
+        const cloudName = "dr0xoodsd";
+        const uploadPreset = "coosajo_preset";
+
         let currentPlaylist = [];
 
-        // 1. LA MAGIA: DESCUBRIR LA PANTALLA EN LA RED
-        onSnapshot(doc(db, "signage", "device"), (docSnap) => {
-            const statusEl = document.getElementById('connectionStatus');
-            if (docSnap.exists() && docSnap.data().ip) {
-                targetIp = docSnap.data().ip;
-                statusEl.innerHTML = `<span class="bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm font-bold flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div> Enlazado a TV</span>`;
-                loadPlaylist();
-                // Refrescar qué hay en pantalla cada 5 segundos
-                setInterval(loadPlaylist, 5000); 
-            } else {
-                statusEl.innerHTML = `<span class="bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm font-bold">Pantalla Apagada</span>`;
-            }
+        // ESCUCHAR CAMBIOS EN FIRESTORE EN TIEMPO REAL
+        onSnapshot(collection(db, "signage_media"), (snapshot) => {
+            currentPlaylist = [];
+            snapshot.forEach((doc) => {
+                currentPlaylist.push({ id: doc.id, ...doc.data() });
+            });
+            // Ordenar por fecha de subida
+            currentPlaylist.sort((a, b) => a.timestamp - b.timestamp);
+            renderPlaylist();
         });
 
-        // 2. LEER ARCHIVOS DIRECTAMENTE DE LA TV
-        async function loadPlaylist() {
-            if(!targetIp) return;
-            try {
-                const res = await fetch(`http://${targetIp}:8080/playlist`);
-                currentPlaylist = await res.json();
-                renderPlaylist();
-            } catch (e) {
-                console.error("Error conectando a la TV", e);
-            }
-        }
-
-        // 3. ENVIAR FOTOS/VIDEOS POR WI-FI
+        // SUBIR ARCHIVOS (A CLOUDINARY Y LUEGO A FIRESTORE)
         window.handleFiles = async function(files) {
             if (!files.length) return;
-            if (!targetIp) {
-                alert("Espera a que la pantalla se conecte o verifica que estén en el mismo Wi-Fi.");
-                return;
-            }
             
             document.getElementById('uploadProgress').classList.remove('hidden');
             const bar = document.getElementById('progressBar');
+            const statusText = document.getElementById('uploadStatusText');
             
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
                 bar.style.width = '30%'; 
+                statusText.innerText = "Subiendo a la nube...";
                 
                 try {
-                    const res = await fetch(`http://${targetIp}:8080/upload?filename=` + encodeURIComponent(file.name.replace(/\s+/g, '_')), {
+                    // 1. Subir a Cloudinary
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    formData.append('upload_preset', uploadPreset);
+                    
+                    const uploadType = file.type.startsWith('video') ? 'video' : 'image';
+                    const cloudRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/${uploadType}/upload`, {
                         method: 'POST',
-                        body: file
+                        body: formData
                     });
-                    if (res.ok) {
-                        bar.style.width = '100%';
-                    }
+                    
+                    if (!cloudRes.ok) throw new Error("Fallo en Cloudinary");
+                    const cloudData = await cloudRes.json();
+                    const secureUrl = cloudData.secure_url;
+                    
+                    bar.style.width = '70%';
+                    statusText.innerText = "Guardando enlace en Firebase...";
+
+                    // 2. Guardar en Firestore
+                    await addDoc(collection(db, "signage_media"), {
+                        fileName: file.name,
+                        type: uploadType,
+                        url: secureUrl,
+                        timestamp: Date.now()
+                    });
+
+                    bar.style.width = '100%';
                 } catch (e) {
-                    console.error("Error subiendo a la TV", e);
-                    alert("Error: Asegúrate de estar conectado al mismo Wi-Fi que la pantalla.");
+                    console.error("Fallo subida", e);
+                    alert("Error subiendo el archivo: " + file.name);
                 }
             }
             
             setTimeout(() => {
                 document.getElementById('uploadProgress').classList.add('hidden');
                 bar.style.width = '0%';
-                loadPlaylist();
-            }, 500);
+                statusText.innerText = "";
+            }, 1000);
         }
 
-        window.deleteItem = async function(fileName) {
-            if(confirm('¿Seguro que deseas eliminar ' + fileName + '?')) {
-                await fetch(`http://${targetIp}:8080/delete?filename=` + encodeURIComponent(fileName), { method: 'POST' });
-                loadPlaylist();
+        // BORRAR ARCHIVOS DE FIRESTORE
+        window.deleteItem = async function(docId, fileName) {
+            if(confirm('¿Seguro que deseas eliminar ' + fileName + '? (Desaparecerá de todas las pantallas)')) {
+                await deleteDoc(doc(db, "signage_media", docId));
             }
         };
 
@@ -99,28 +105,28 @@
             const container = document.getElementById('playlistContainer');
             container.innerHTML = '';
             if(currentPlaylist.length === 0) {
-                container.innerHTML = '<p class="text-slate-500 text-center py-10 font-bold text-lg">La pantalla está vacía.<br>Sube contenido arrastrándolo arriba para empezar.</p>';
+                container.innerHTML = '<p class="text-slate-500 text-center py-10 font-bold text-lg">No hay contenido activo.<br>Sube imágenes o videos arriba para empezar.</p>';
                 return;
             }
             currentPlaylist.forEach((item) => {
                 const el = document.createElement('div');
                 el.className = 'flex items-center justify-between p-4 bg-white rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow';
-                // La imagen se lee directo desde la TV en red local
-                const mediaUrl = `http://${targetIp}:8080${item.url}`;
                 
                 el.innerHTML = `
                     <div class="flex items-center gap-4 w-3/4">
                         <div class="h-20 w-32 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0">
                             ${item.type === 'video' 
-                                ? '<video src="'+mediaUrl+'" class="h-full w-full object-cover"></video>' 
-                                : '<img src="'+mediaUrl+'" class="h-full w-full object-cover"/>'}
+                                ? '<video src="'+item.url+'" class="h-full w-full object-cover"></video>' 
+                                : '<img src="'+item.url+'" class="h-full w-full object-cover"/>'}
                         </div>
                         <div class="truncate">
-                            <h3 class="font-bold text-slate-800 truncate">${item.name}</h3>
-                            <p class="text-xs text-[#158e45] uppercase font-black bg-green-50 inline-block px-2 py-1 rounded-md mt-1">${item.type}</p>
+                            <h3 class="font-bold text-slate-800 truncate">${item.fileName}</h3>
+                            <p class="text-xs text-[#158e45] uppercase font-black bg-green-50 inline-block px-2 py-1 rounded-md mt-1">
+                                ${item.type} (Sincronizado)
+                            </p>
                         </div>
                     </div>
-                    <button onclick="deleteItem('${item.name}')" class="p-4 text-red-500 hover:bg-red-50 rounded-xl transition-colors shadow-sm border border-red-100">
+                    <button onclick="deleteItem('${item.id}', '${item.fileName}')" class="p-4 text-red-500 hover:bg-red-50 rounded-xl transition-colors shadow-sm border border-red-100">
                         <i data-lucide="trash-2"></i>
                     </button>
                 `;
@@ -129,7 +135,7 @@
             lucide.createIcons();
         }
 
-        // Configurar arrastrar y soltar
+        // DRAG AND DROP
         document.addEventListener('DOMContentLoaded', () => {
             const area = document.getElementById('uploadArea');
             area.addEventListener('dragover', (e) => { e.preventDefault(); area.classList.add('border-green-500', 'bg-green-50'); });
@@ -149,34 +155,36 @@
         <!-- HEADER -->
         <div class="bg-white rounded-3xl p-8 shadow-sm border border-slate-200 flex items-center justify-between">
             <div>
-                <h1 class="text-3xl font-black text-[#172e59]">Panel de Control</h1>
-                <h2 class="text-xl font-bold text-[#158e45] mt-1">COOSAJO Local Signage</h2>
-                <div id="connectionStatus" class="mt-3">
-                    <span class="bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-sm font-bold flex items-center gap-2">
-                        <div class="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div> Buscando Pantalla...
+                <h1 class="text-3xl font-black text-[#172e59]">Panel de Control Nube</h1>
+                <h2 class="text-xl font-bold text-[#158e45] mt-1">Cloudinary + Firebase</h2>
+                <div class="mt-3">
+                    <span class="bg-blue-100 text-blue-700 px-3 py-1 rounded-full text-sm font-bold flex items-center gap-2 w-max">
+                        <div class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div> Conectado al Servidor Global
                     </span>
                 </div>
             </div>
             <div class="h-20 w-20 bg-[#172e59] rounded-2xl flex items-center justify-center text-white shadow-xl shadow-blue-900/20">
-                <i data-lucide="zap" class="h-10 w-10"></i>
+                <i data-lucide="cloud" class="h-10 w-10"></i>
             </div>
         </div>
 
         <!-- UPLOADER -->
         <div class="bg-white rounded-3xl p-8 shadow-sm border border-slate-200 relative overflow-hidden">
             <div id="uploadArea" class="border-4 border-dashed border-slate-300 rounded-2xl p-12 text-center transition-colors bg-slate-50/50">
-                <i data-lucide="hard-drive-upload" class="h-20 w-20 mx-auto text-slate-400 mb-6"></i>
-                <h2 class="text-2xl font-black text-slate-700">Arrastra tus fotos y videos aquí</h2>
-                <p class="text-slate-500 mt-2 mb-8 text-lg">o haz clic para buscarlos</p>
+                <i data-lucide="cloud-upload" class="h-20 w-20 mx-auto text-slate-400 mb-6"></i>
+                <h2 class="text-2xl font-black text-slate-700">Arrastra fotos y videos aquí</h2>
+                <p class="text-slate-500 mt-2 mb-8 text-lg">Viajarán por internet hacia las pantallas</p>
                 <label class="bg-[#158e45] hover:bg-green-700 text-white px-10 py-4 rounded-xl font-black cursor-pointer transition-colors shadow-lg shadow-green-600/30 text-lg uppercase tracking-wide">
                     Seleccionar Archivos
                     <input type="file" id="fileInput" multiple accept="image/*,video/*" class="hidden">
                 </label>
             </div>
 
-            <div id="uploadProgress" class="hidden absolute bottom-0 left-0 right-0 h-3 bg-slate-200">
-                <div id="progressBar" class="h-full bg-[#158e45] w-0 transition-all duration-300 relative">
+            <!-- PROGRESO -->
+            <div id="uploadProgress" class="hidden absolute bottom-0 left-0 right-0 h-8 bg-slate-200">
+                <div id="progressBar" class="h-full bg-[#158e45] w-0 transition-all duration-300 relative flex items-center justify-center">
                     <div class="absolute inset-0 bg-white/20 animate-pulse"></div>
+                    <span id="uploadStatusText" class="text-white text-xs font-bold relative z-10"></span>
                 </div>
             </div>
         </div>
@@ -184,10 +192,10 @@
         <!-- PLAYLIST -->
         <div class="bg-white rounded-3xl p-8 shadow-sm border border-slate-200">
             <h2 class="text-2xl font-black text-[#172e59] mb-6 flex items-center gap-3 border-b border-slate-100 pb-4">
-                <i data-lucide="play-square" class="text-[#158e45]"></i> Contenido en Pantalla
+                <i data-lucide="monitor-play" class="text-[#158e45]"></i> Contenido Sincronizado
             </h2>
             <div id="playlistContainer" class="space-y-4">
-                <p class="text-slate-500 text-center py-10 animate-pulse text-lg">Esperando conexión...</p>
+                <p class="text-slate-500 text-center py-10 animate-pulse text-lg">Cargando base de datos...</p>
             </div>
         </div>
 
