@@ -3,18 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard COOSAJO Cloud</title>
-    <!-- Librerías de Diseño (Tailwind y Lucide Icons) -->
+    <title>Dashboard COOSAJO Automático</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     
-    <!-- Conexión a tu nube de Firebase -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
-        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
-        import { getStorage, ref, uploadBytesResumable, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-storage.js";
+        import { getFirestore, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
 
-        // TUS LLAVES (Ya están configuradas para ti)
         const firebaseConfig = {
           apiKey: "AIzaSyBGF-do5_cykTa9rB5NK-7ie4x4rpoYc0g",
           authDomain: "coosajo-signage.firebaseapp.com",
@@ -26,146 +22,158 @@
 
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
-        const storage = getStorage(app);
 
-        // Elementos de la página
-        const fileInput = document.getElementById('fileInput');
-        const uploadArea = document.getElementById('uploadArea');
-        const playlistContainer = document.getElementById('playlistContainer');
-        const uploadProgress = document.getElementById('uploadProgress');
-        const progressBar = document.getElementById('progressBar');
-
+        let targetIp = "";
         let currentPlaylist = [];
 
-        // Leer la base de datos en tiempo real
-        onSnapshot(doc(db, "signage", "playlist"), (docSnap) => {
-            if (docSnap.exists()) {
-                currentPlaylist = docSnap.data().items || [];
-                renderPlaylist();
+        // 1. LA MAGIA: DESCUBRIR LA PANTALLA EN LA RED
+        onSnapshot(doc(db, "signage", "device"), (docSnap) => {
+            const statusEl = document.getElementById('connectionStatus');
+            if (docSnap.exists() && docSnap.data().ip) {
+                targetIp = docSnap.data().ip;
+                statusEl.innerHTML = `<span class="bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm font-bold flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div> Enlazado a TV</span>`;
+                loadPlaylist();
+                // Refrescar qué hay en pantalla cada 5 segundos
+                setInterval(loadPlaylist, 5000); 
             } else {
-                renderPlaylist();
+                statusEl.innerHTML = `<span class="bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm font-bold">Pantalla Apagada</span>`;
             }
         });
 
-        // Efectos de arrastrar y soltar
-        uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('border-green-500', 'bg-green-50'); });
-        uploadArea.addEventListener('dragleave', () => { uploadArea.classList.remove('border-green-500', 'bg-green-50'); });
-        uploadArea.addEventListener('drop', (e) => {
-            e.preventDefault();
-            uploadArea.classList.remove('border-green-500', 'bg-green-50');
-            handleFiles(e.dataTransfer.files);
-        });
-        fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+        // 2. LEER ARCHIVOS DIRECTAMENTE DE LA TV
+        async function loadPlaylist() {
+            if(!targetIp) return;
+            try {
+                const res = await fetch(`http://${targetIp}:8080/playlist`);
+                currentPlaylist = await res.json();
+                renderPlaylist();
+            } catch (e) {
+                console.error("Error conectando a la TV", e);
+            }
+        }
 
-        // Subir los archivos a la nube
-        async function handleFiles(files) {
+        // 3. ENVIAR FOTOS/VIDEOS POR WI-FI
+        window.handleFiles = async function(files) {
             if (!files.length) return;
-            uploadProgress.classList.remove('hidden');
+            if (!targetIp) {
+                alert("Espera a que la pantalla se conecte o verifica que estén en el mismo Wi-Fi.");
+                return;
+            }
+            
+            document.getElementById('uploadProgress').classList.remove('hidden');
+            const bar = document.getElementById('progressBar');
             
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
-                const storageRef = ref(storage, `media/${Date.now()}_${file.name.replace(/\s+/g, '_')}`);
-                const uploadTask = uploadBytesResumable(storageRef, file);
-
-                await new Promise((resolve, reject) => {
-                    uploadTask.on('state_changed', 
-                        (snapshot) => {
-                            const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-                            progressBar.style.width = progress + '%';
-                        }, 
-                        (error) => { console.error("Error subiendo:", error); reject(error); }, 
-                        async () => {
-                            const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-                            currentPlaylist.push({
-                                url: downloadURL,
-                                name: file.name,
-                                type: file.type.startsWith('video/') ? 'video' : 'image',
-                                path: uploadTask.snapshot.ref.fullPath
-                            });
-                            resolve();
-                        }
-                    );
-                });
+                bar.style.width = '30%'; 
+                
+                try {
+                    const res = await fetch(`http://${targetIp}:8080/upload?filename=` + encodeURIComponent(file.name.replace(/\s+/g, '_')), {
+                        method: 'POST',
+                        body: file
+                    });
+                    if (res.ok) {
+                        bar.style.width = '100%';
+                    }
+                } catch (e) {
+                    console.error("Error subiendo a la TV", e);
+                    alert("Error: Asegúrate de estar conectado al mismo Wi-Fi que la pantalla.");
+                }
             }
             
-            // Guardar el orden en la base de datos (Esto actualizará las pantallas automáticamente)
-            await setDoc(doc(db, "signage", "playlist"), { items: currentPlaylist });
-            uploadProgress.classList.add('hidden');
-            progressBar.style.width = '0%';
+            setTimeout(() => {
+                document.getElementById('uploadProgress').classList.add('hidden');
+                bar.style.width = '0%';
+                loadPlaylist();
+            }, 500);
         }
 
-        // Borrar archivos de la nube y de la pantalla
-        window.deleteItem = async function(index) {
-            const item = currentPlaylist[index];
-            if(confirm('¿Seguro que deseas eliminar ' + item.name + ' de las pantallas?')) {
-                currentPlaylist.splice(index, 1);
-                await setDoc(doc(db, "signage", "playlist"), { items: currentPlaylist });
-                try {
-                    const desertRef = ref(storage, item.path);
-                    await deleteObject(desertRef);
-                } catch(e) { console.error("Error borrando archivo:", e); }
+        window.deleteItem = async function(fileName) {
+            if(confirm('¿Seguro que deseas eliminar ' + fileName + '?')) {
+                await fetch(`http://${targetIp}:8080/delete?filename=` + encodeURIComponent(fileName), { method: 'POST' });
+                loadPlaylist();
             }
         };
 
         function renderPlaylist() {
-            playlistContainer.innerHTML = '';
+            const container = document.getElementById('playlistContainer');
+            container.innerHTML = '';
             if(currentPlaylist.length === 0) {
-                playlistContainer.innerHTML = '<p class="text-slate-500 text-center py-10 font-bold">No hay contenido activo en las pantallas.<br>Arrastra imágenes o videos arriba para empezar.</p>';
+                container.innerHTML = '<p class="text-slate-500 text-center py-10 font-bold text-lg">La pantalla está vacía.<br>Sube contenido arrastrándolo arriba para empezar.</p>';
                 return;
             }
-            currentPlaylist.forEach((item, index) => {
+            currentPlaylist.forEach((item) => {
                 const el = document.createElement('div');
                 el.className = 'flex items-center justify-between p-4 bg-white rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow';
+                // La imagen se lee directo desde la TV en red local
+                const mediaUrl = `http://${targetIp}:8080${item.url}`;
+                
                 el.innerHTML = `
                     <div class="flex items-center gap-4 w-3/4">
                         <div class="h-20 w-32 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0">
                             ${item.type === 'video' 
-                                ? '<video src="'+item.url+'" class="h-full w-full object-cover"></video>' 
-                                : '<img src="'+item.url+'" class="h-full w-full object-cover"/>'}
+                                ? '<video src="'+mediaUrl+'" class="h-full w-full object-cover"></video>' 
+                                : '<img src="'+mediaUrl+'" class="h-full w-full object-cover"/>'}
                         </div>
                         <div class="truncate">
                             <h3 class="font-bold text-slate-800 truncate">${item.name}</h3>
                             <p class="text-xs text-[#158e45] uppercase font-black bg-green-50 inline-block px-2 py-1 rounded-md mt-1">${item.type}</p>
                         </div>
                     </div>
-                    <button onclick="deleteItem(${index})" class="p-4 text-red-500 hover:bg-red-50 rounded-xl transition-colors shadow-sm border border-red-100" title="Eliminar de las pantallas">
+                    <button onclick="deleteItem('${item.name}')" class="p-4 text-red-500 hover:bg-red-50 rounded-xl transition-colors shadow-sm border border-red-100">
                         <i data-lucide="trash-2"></i>
                     </button>
                 `;
-                playlistContainer.appendChild(el);
+                container.appendChild(el);
             });
             lucide.createIcons();
         }
+
+        // Configurar arrastrar y soltar
+        document.addEventListener('DOMContentLoaded', () => {
+            const area = document.getElementById('uploadArea');
+            area.addEventListener('dragover', (e) => { e.preventDefault(); area.classList.add('border-green-500', 'bg-green-50'); });
+            area.addEventListener('dragleave', () => { area.classList.remove('border-green-500', 'bg-green-50'); });
+            area.addEventListener('drop', (e) => {
+                e.preventDefault();
+                area.classList.remove('border-green-500', 'bg-green-50');
+                handleFiles(e.dataTransfer.files);
+            });
+            document.getElementById('fileInput').addEventListener('change', (e) => handleFiles(e.target.files));
+        });
     </script>
 </head>
 <body class="bg-slate-50 min-h-screen p-4 md:p-8 font-sans">
     <div class="max-w-4xl mx-auto space-y-8">
         
-        <!-- ENCABEZADO -->
+        <!-- HEADER -->
         <div class="bg-white rounded-3xl p-8 shadow-sm border border-slate-200 flex items-center justify-between">
             <div>
                 <h1 class="text-3xl font-black text-[#172e59]">Panel de Control</h1>
-                <h2 class="text-xl font-bold text-[#158e45] mt-1">COOSAJO Cloud Signage</h2>
-                <p class="text-slate-500 mt-2">Lo que subas aquí aparecerá inmediatamente en todas las pantallas.</p>
+                <h2 class="text-xl font-bold text-[#158e45] mt-1">COOSAJO Local Signage</h2>
+                <div id="connectionStatus" class="mt-3">
+                    <span class="bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-sm font-bold flex items-center gap-2">
+                        <div class="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div> Buscando Pantalla...
+                    </span>
+                </div>
             </div>
-                        <div>
-                <img src="LOGO COOSAJO SIN ESLOGAN.png" class="h-20 object-contain" alt="Logo COOSAJO" />
+            <div class="h-20 w-20 bg-[#172e59] rounded-2xl flex items-center justify-center text-white shadow-xl shadow-blue-900/20">
+                <i data-lucide="zap" class="h-10 w-10"></i>
             </div>
         </div>
 
-        <!-- ZONA PARA SUBIR ARCHIVOS -->
+        <!-- UPLOADER -->
         <div class="bg-white rounded-3xl p-8 shadow-sm border border-slate-200 relative overflow-hidden">
             <div id="uploadArea" class="border-4 border-dashed border-slate-300 rounded-2xl p-12 text-center transition-colors bg-slate-50/50">
-                <i data-lucide="cloud-upload" class="h-20 w-20 mx-auto text-slate-400 mb-6"></i>
+                <i data-lucide="hard-drive-upload" class="h-20 w-20 mx-auto text-slate-400 mb-6"></i>
                 <h2 class="text-2xl font-black text-slate-700">Arrastra tus fotos y videos aquí</h2>
-                <p class="text-slate-500 mt-2 mb-8 text-lg">o haz clic para buscarlos en tu computadora</p>
+                <p class="text-slate-500 mt-2 mb-8 text-lg">o haz clic para buscarlos</p>
                 <label class="bg-[#158e45] hover:bg-green-700 text-white px-10 py-4 rounded-xl font-black cursor-pointer transition-colors shadow-lg shadow-green-600/30 text-lg uppercase tracking-wide">
                     Seleccionar Archivos
                     <input type="file" id="fileInput" multiple accept="image/*,video/*" class="hidden">
                 </label>
             </div>
 
-            <!-- BARRA DE CARGA -->
             <div id="uploadProgress" class="hidden absolute bottom-0 left-0 right-0 h-3 bg-slate-200">
                 <div id="progressBar" class="h-full bg-[#158e45] w-0 transition-all duration-300 relative">
                     <div class="absolute inset-0 bg-white/20 animate-pulse"></div>
@@ -173,13 +181,13 @@
             </div>
         </div>
 
-        <!-- LISTA DE LO QUE HAY EN PANTALLA -->
+        <!-- PLAYLIST -->
         <div class="bg-white rounded-3xl p-8 shadow-sm border border-slate-200">
             <h2 class="text-2xl font-black text-[#172e59] mb-6 flex items-center gap-3 border-b border-slate-100 pb-4">
-                <i data-lucide="list-video" class="text-[#158e45]"></i> Contenido Reproduciéndose Ahora
+                <i data-lucide="play-square" class="text-[#158e45]"></i> Contenido en Pantalla
             </h2>
             <div id="playlistContainer" class="space-y-4">
-                <p class="text-slate-500 text-center py-10 animate-pulse">Cargando conexión con la nube...</p>
+                <p class="text-slate-500 text-center py-10 animate-pulse text-lg">Esperando conexión...</p>
             </div>
         </div>
 
