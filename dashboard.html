@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard COOSAJO Cloud</title>
+    <!-- Librerías de Diseño (Tailwind y Lucide Icons) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- Conexión a tu nube de Firebase -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+        import { getStorage, ref, uploadBytesResumable, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-storage.js";
+
+        // TUS LLAVES (Ya están configuradas para ti)
+        const firebaseConfig = {
+          apiKey: "AIzaSyBGF-do5_cykTa9rB5NK-7ie4x4rpoYc0g",
+          authDomain: "coosajo-signage.firebaseapp.com",
+          projectId: "coosajo-signage",
+          storageBucket: "coosajo-signage.firebasestorage.app",
+          messagingSenderId: "941731323301",
+          appId: "1:941731323301:web:a786e9fe7cbec6c66b9c4c"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const storage = getStorage(app);
+
+        // Elementos de la página
+        const fileInput = document.getElementById('fileInput');
+        const uploadArea = document.getElementById('uploadArea');
+        const playlistContainer = document.getElementById('playlistContainer');
+        const uploadProgress = document.getElementById('uploadProgress');
+        const progressBar = document.getElementById('progressBar');
+
+        let currentPlaylist = [];
+
+        // Leer la base de datos en tiempo real
+        onSnapshot(doc(db, "signage", "playlist"), (docSnap) => {
+            if (docSnap.exists()) {
+                currentPlaylist = docSnap.data().items || [];
+                renderPlaylist();
+            } else {
+                renderPlaylist();
+            }
+        });
+
+        // Efectos de arrastrar y soltar
+        uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('border-green-500', 'bg-green-50'); });
+        uploadArea.addEventListener('dragleave', () => { uploadArea.classList.remove('border-green-500', 'bg-green-50'); });
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('border-green-500', 'bg-green-50');
+            handleFiles(e.dataTransfer.files);
+        });
+        fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+
+        // Subir los archivos a la nube
+        async function handleFiles(files) {
+            if (!files.length) return;
+            uploadProgress.classList.remove('hidden');
+            
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const storageRef = ref(storage, `media/${Date.now()}_${file.name.replace(/\s+/g, '_')}`);
+                const uploadTask = uploadBytesResumable(storageRef, file);
+
+                await new Promise((resolve, reject) => {
+                    uploadTask.on('state_changed', 
+                        (snapshot) => {
+                            const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+                            progressBar.style.width = progress + '%';
+                        }, 
+                        (error) => { console.error("Error subiendo:", error); reject(error); }, 
+                        async () => {
+                            const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+                            currentPlaylist.push({
+                                url: downloadURL,
+                                name: file.name,
+                                type: file.type.startsWith('video/') ? 'video' : 'image',
+                                path: uploadTask.snapshot.ref.fullPath
+                            });
+                            resolve();
+                        }
+                    );
+                });
+            }
+            
+            // Guardar el orden en la base de datos (Esto actualizará las pantallas automáticamente)
+            await setDoc(doc(db, "signage", "playlist"), { items: currentPlaylist });
+            uploadProgress.classList.add('hidden');
+            progressBar.style.width = '0%';
+        }
+
+        // Borrar archivos de la nube y de la pantalla
+        window.deleteItem = async function(index) {
+            const item = currentPlaylist[index];
+            if(confirm('¿Seguro que deseas eliminar ' + item.name + ' de las pantallas?')) {
+                currentPlaylist.splice(index, 1);
+                await setDoc(doc(db, "signage", "playlist"), { items: currentPlaylist });
+                try {
+                    const desertRef = ref(storage, item.path);
+                    await deleteObject(desertRef);
+                } catch(e) { console.error("Error borrando archivo:", e); }
+            }
+        };
+
+        function renderPlaylist() {
+            playlistContainer.innerHTML = '';
+            if(currentPlaylist.length === 0) {
+                playlistContainer.innerHTML = '<p class="text-slate-500 text-center py-10 font-bold">No hay contenido activo en las pantallas.<br>Arrastra imágenes o videos arriba para empezar.</p>';
+                return;
+            }
+            currentPlaylist.forEach((item, index) => {
+                const el = document.createElement('div');
+                el.className = 'flex items-center justify-between p-4 bg-white rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow';
+                el.innerHTML = `
+                    <div class="flex items-center gap-4 w-3/4">
+                        <div class="h-20 w-32 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0">
+                            ${item.type === 'video' 
+                                ? '<video src="'+item.url+'" class="h-full w-full object-cover"></video>' 
+                                : '<img src="'+item.url+'" class="h-full w-full object-cover"/>'}
+                        </div>
+                        <div class="truncate">
+                            <h3 class="font-bold text-slate-800 truncate">${item.name}</h3>
+                            <p class="text-xs text-[#158e45] uppercase font-black bg-green-50 inline-block px-2 py-1 rounded-md mt-1">${item.type}</p>
+                        </div>
+                    </div>
+                    <button onclick="deleteItem(${index})" class="p-4 text-red-500 hover:bg-red-50 rounded-xl transition-colors shadow-sm border border-red-100" title="Eliminar de las pantallas">
+                        <i data-lucide="trash-2"></i>
+                    </button>
+                `;
+                playlistContainer.appendChild(el);
+            });
+            lucide.createIcons();
+        }
+    </script>
+</head>
+<body class="bg-slate-50 min-h-screen p-4 md:p-8 font-sans">
+    <div class="max-w-4xl mx-auto space-y-8">
+        
+        <!-- ENCABEZADO -->
+        <div class="bg-white rounded-3xl p-8 shadow-sm border border-slate-200 flex items-center justify-between">
+            <div>
+                <h1 class="text-3xl font-black text-[#172e59]">Panel de Control</h1>
+                <h2 class="text-xl font-bold text-[#158e45] mt-1">COOSAJO Cloud Signage</h2>
+                <p class="text-slate-500 mt-2">Lo que subas aquí aparecerá inmediatamente en todas las pantallas.</p>
+            </div>
+            <div class="h-20 w-20 bg-[#172e59] rounded-2xl flex items-center justify-center text-white shadow-xl shadow-blue-900/20">
+                <i data-lucide="monitor-play" class="h-10 w-10"></i>
+            </div>
+        </div>
+
+        <!-- ZONA PARA SUBIR ARCHIVOS -->
+        <div class="bg-white rounded-3xl p-8 shadow-sm border border-slate-200 relative overflow-hidden">
+            <div id="uploadArea" class="border-4 border-dashed border-slate-300 rounded-2xl p-12 text-center transition-colors bg-slate-50/50">
+                <i data-lucide="cloud-upload" class="h-20 w-20 mx-auto text-slate-400 mb-6"></i>
+                <h2 class="text-2xl font-black text-slate-700">Arrastra tus fotos y videos aquí</h2>
+                <p class="text-slate-500 mt-2 mb-8 text-lg">o haz clic para buscarlos en tu computadora</p>
+                <label class="bg-[#158e45] hover:bg-green-700 text-white px-10 py-4 rounded-xl font-black cursor-pointer transition-colors shadow-lg shadow-green-600/30 text-lg uppercase tracking-wide">
+                    Seleccionar Archivos
+                    <input type="file" id="fileInput" multiple accept="image/*,video/*" class="hidden">
+                </label>
+            </div>
+
+            <!-- BARRA DE CARGA -->
+            <div id="uploadProgress" class="hidden absolute bottom-0 left-0 right-0 h-3 bg-slate-200">
+                <div id="progressBar" class="h-full bg-[#158e45] w-0 transition-all duration-300 relative">
+                    <div class="absolute inset-0 bg-white/20 animate-pulse"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- LISTA DE LO QUE HAY EN PANTALLA -->
+        <div class="bg-white rounded-3xl p-8 shadow-sm border border-slate-200">
+            <h2 class="text-2xl font-black text-[#172e59] mb-6 flex items-center gap-3 border-b border-slate-100 pb-4">
+                <i data-lucide="list-video" class="text-[#158e45]"></i> Contenido Reproduciéndose Ahora
+            </h2>
+            <div id="playlistContainer" class="space-y-4">
+                <p class="text-slate-500 text-center py-10 animate-pulse">Cargando conexión con la nube...</p>
+            </div>
+        </div>
+
+    </div>
+    <script>lucide.createIcons();</script>
+</body>
+</html>
